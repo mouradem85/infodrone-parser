@@ -1,17 +1,42 @@
-cmake_minimum_required(VERSION 3.20)
-project(InfodroneParser LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.25)
+project(InfoDroneParserProject CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+# Exigence de C++23
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    add_compile_options(-O3 -march=native -Wall -Wextra -Wpedantic)
-endif()
+# --- Intégration de GoogleTest (mis en premier pour l'avoir partout) ---
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+)
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
 
-include_directories(include)
-
-add_executable(infodrone_parser
+# Binaire principal
+add_executable(drone_parser
     src/main.cpp
+    src/InfoDroneParser.cpp
     src/PcapDataSource.cpp
 )
+
+target_include_directories(drone_parser PRIVATE include)
+
+# On autorise drone_parser à voir les headers de GoogleTest (pour FRIEND_TEST)
+target_link_libraries(drone_parser PRIVATE gtest)
+
+# --- Configuration des tests unitaires ---
+enable_testing()
+
+add_executable(unit_tests
+    tests/test_parser.cpp
+    src/InfoDroneParser.cpp
+)
+
+target_include_directories(unit_tests PRIVATE include)
+
+target_link_libraries(unit_tests PRIVATE GTest::gtest_main)
+
+include(GoogleTest)
+gtest_discover_tests(unit_tests)
