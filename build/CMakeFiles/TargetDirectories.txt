@@ -1,3 +1,0 @@
-/workspaces/infodrone-parser/build/CMakeFiles/infodrone_parser.dir
-/workspaces/infodrone-parser/build/CMakeFiles/edit_cache.dir
-/workspaces/infodrone-parser/build/CMakeFiles/rebuild_cache.dir

@@ -1,36 +1,26 @@
-#include <iostream>
-#include <string>
-#include <vector>
-#include <cstdint>
 #include "infodrone/PcapDataSource.hpp"
+#include "infodrone/InfoDroneParser.hpp"
+#include <memory>
+#include <iostream>
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <fichier.pcap>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <chemin_fichier_pcap_ou_donnees>\n";
         return 1;
     }
 
     std::string filepath = argv[1];
-    infodrone::PcapDataSource dataSource;
+    
 
-    if (!dataSource.open(filepath)) {
-        std::cerr << "Erreur : Impossible d'ouvrir le fichier : " << filepath << std::endl;
+    // Instanciation de la source de données PCAP et injection dans le parseur
+    auto dataSource = std::make_unique<infodrone::PcapDataSource>();
+    infodrone::InfoDroneParser parser(std::move(dataSource));
+
+    if (!parser.processFile(filepath)) {
+        std::cerr << "[Erreur] Échec lors du traitement du fichier : " << filepath << "\n";
         return 1;
     }
 
-    std::cout << "Fichier ouvert avec succes : " << filepath << std::endl;
-
-    std::vector<uint8_t> packetBuffer;
-    int16_t rssi = 0;
-    size_t packetCount = 0;
-
-    while (dataSource.getNextPacket(packetBuffer, rssi)) {
-        packetCount++;
-        // Traitement des paquets à venir...
-    }
-
-    std::cout << "Nombre total de paquets lus : " << packetCount << std::endl;
-
-    dataSource.close();
+    std::cout << "[Succès] Traitement du fichier terminé avec succès.\n";
     return 0;
 }
