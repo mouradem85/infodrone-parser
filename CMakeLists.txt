@@ -40,3 +40,17 @@ target_link_libraries(unit_tests PRIVATE GTest::gtest_main)
 
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
+
+# --- Installation et Packaging DEB ---
+install(TARGETS drone_parser
+    RUNTIME DESTINATION bin
+)
+
+set(CPACK_PACKAGE_NAME "infodrone-parser")
+set(CPACK_PACKAGE_VERSION "1.0.0")
+set(CPACK_PACKAGE_CONTACT "Expert Low Latency <contact@infodrone.local>")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Expert Low Latency")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Parseur haute performance de flux réseau pour drones")
+set(CPACK_GENERATOR "DEB")
+
+include(CPack)

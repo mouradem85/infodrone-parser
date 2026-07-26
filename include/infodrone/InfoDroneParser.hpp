@@ -90,6 +90,10 @@ private:
      */
     std::expected<RadiotapInfo, ParseError> extractRadiotap(std::span<const uint8_t> packetData) const;
 
+    void parseVendorSpecificTag(std::span<const uint8_t> tagData);
+
+    std::string parseErrorToString(ParseError error);
+
     std::unique_ptr<IDataSource> dataSource_;
 };
 

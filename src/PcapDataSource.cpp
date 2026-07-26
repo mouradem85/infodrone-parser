@@ -41,7 +41,7 @@ std::optional<std::span<const uint8_t>> PcapDataSource::getNextPacket() {
 void PcapDataSource::close() {
     if (fileStream_.is_open()) {
         fileStream_.close();
-    }
+    }   
 }
 
 } // namespace infodrone
