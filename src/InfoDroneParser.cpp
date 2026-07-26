@@ -36,12 +36,11 @@ bool InfoDroneParser::processFile(const std::string& filepath) {
     return true;
 }
 
-std::expected<void, ParseError> InfoDroneParser::decodePacket(std::span<const uint8_t> packetData) {
+std::expected<RadiotapInfo, ParseError> InfoDroneParser::extractRadiotap(std::span<const uint8_t> packetData) const {
     if (packetData.size() < 4) {
         return std::unexpected(ParseError::PacketTooShort);
     }
 
-    // --- 1. Extraction et validation du Radiotap ---
     uint16_t radiotap_len = *reinterpret_cast<const uint16_t*>(packetData.data() + 2);
     if (radiotap_len > 256 || packetData.size() < radiotap_len + sizeof(IEEE80211Header)) {
         return std::unexpected(ParseError::InvalidRadiotap);
@@ -58,6 +57,56 @@ std::expected<void, ParseError> InfoDroneParser::decodePacket(std::span<const ui
         }
     }
 
+    return RadiotapInfo{radiotap_len, rssi_dbm, rssiFound};
+}
+
+std::expected<void, ParseError> InfoDroneParser::parseInformationElements(std::span<const uint8_t> packetData, size_t& offset)
+{
+    while (offset + 2 <= packetData.size()) {
+        uint8_t tagId = packetData[offset];
+        uint8_t tagLen = packetData[offset + 1];
+        offset += 2;
+
+        if (offset + tagLen > packetData.size()) {
+            return std::unexpected(ParseError::MalformedInformationElement);
+        }
+
+        std::span<const uint8_t> tagData = packetData.subspan(offset, tagLen);
+
+        if (tagId == 0 && tagLen > 0) {
+            std::string ssid(tagData.begin(), tagData.end());
+            bool isValid = true;
+            for (char c : ssid) {
+                if (c < 32 || c > 126) {
+                    isValid = false;
+                    break;
+                }
+            }
+            if (isValid && !ssid.empty()) {
+                std::cout << "  -> [IE] SSID      : " << ssid << "\n";
+            }
+        } 
+        else if (tagId == 3 && tagLen == 1) {
+            std::cout << "  -> [IE] Canal     : " << static_cast<int>(tagData[0]) << "\n";
+        } 
+        else if (tagId == 221) {
+            std::cout << "  -> [IE] Parrot IE : Vendor Specific (Taille: " << static_cast<int>(tagLen) << ")\n";
+        }
+
+        offset += tagLen;
+    }
+    
+    return {};
+}
+
+std::expected<void, ParseError> InfoDroneParser::decodePacket(std::span<const uint8_t> packetData) {
+    // --- 1. Extraction et validation du Radiotap isolées ---
+    auto radiotapResult = extractRadiotap(packetData);
+    if (!radiotapResult) {
+        return std::unexpected(radiotapResult.error());
+    }
+
+    const auto& [radiotap_len, rssi_dbm, rssiFound] = *radiotapResult;
     size_t offset = radiotap_len;
 
     // --- 2. Décodage et filtrage strict de l'en-tête MAC 802.11 ---
@@ -94,42 +143,11 @@ std::expected<void, ParseError> InfoDroneParser::decodePacket(std::span<const ui
     offset += 12; 
 
     // --- 4. Analyse propre des Information Elements (IEs) ---
-    while (offset + 2 <= packetData.size()) {
-        uint8_t tagId = packetData[offset];
-        uint8_t tagLen = packetData[offset + 1];
-        offset += 2;
-
-        if (offset + tagLen > packetData.size()) {
-            return std::unexpected(ParseError::MalformedInformationElement);
-        }
-
-        std::span<const uint8_t> tagData = packetData.subspan(offset, tagLen);
-
-        if (tagId == 0 && tagLen > 0) {
-            std::string ssid(tagData.begin(), tagData.end());
-            bool isValid = true;
-            for (char c : ssid) {
-                if (c < 32 || c > 126) {
-                    isValid = false;
-                    break;
-                }
-            }
-            if (isValid && !ssid.empty()) {
-                std::cout << "  -> [IE] SSID      : " << ssid << "\n";
-            }
-        } 
-        else if (tagId == 3 && tagLen == 1) {
-            std::cout << "  -> [IE] Canal     : " << static_cast<int>(tagData[0]) << "\n";
-        } 
-        else if (tagId == 221) {
-            std::cout << "  -> [IE] Parrot IE : Vendor Specific (Taille: " << static_cast<int>(tagLen) << ")\n";
-        }
-
-        offset += tagLen;
+    if (auto result = parseInformationElements(packetData, offset); !result) {
+        return std::unexpected(result.error());
     }
     
     std::cout << "------------------------------------\n";
     return {};
 }
-
 } // namespace infodrone
