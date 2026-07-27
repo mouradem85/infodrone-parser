@@ -2,8 +2,13 @@
 #include <iostream>
 #include <cstring>
 #include <iomanip>
+#include <algorithm>
+#include <span>
+#include <cmath>
+#include <vector>
 #include <arpa/inet.h>
 #include <cctype>
+#include <endian.h>
 
 namespace infodrone {
 
@@ -40,9 +45,10 @@ std::string InfoDroneParser::parseErrorToString(ParseError error) {
 
 bool InfoDroneParser::processFile(const std::string& filepath) {
     if (!dataSource_->open(filepath)) {
-        std::cerr << "[InfoDroneParser] Échec de l'ouverture de la source pour : " << filepath << "\n";
+        std::cerr << "[InfoDroneParser] Échec de l'ouverture de la source : " << filepath << "\n";
         return false;
     }
+
     int packetCount = 0;
     int errorCount = 0;
     std::optional<std::span<const uint8_t>> packetBuffer;
@@ -53,23 +59,25 @@ bool InfoDroneParser::processFile(const std::string& filepath) {
         auto result = decodePacket(packetBuffer.value());
         if (!result) {
             ++errorCount;
-            std::cerr << "[Erreur] Paquet #" << packetCount 
+            std::cerr << "[Avertissement] Paquet #" << packetCount 
                       << " -> " << parseErrorToString(result.error()) << "\n";
         }
     }
 
-    std::cout << "[InfoDroneParser] Traitement terminé. Total paquets : " << packetCount 
-              << " | Erreurs : " << errorCount << "\n";
+    std::cout << "\n=========================================\n";
+    std::cout << "           RAPPORT DE TRAITEMENT         \n";
+    std::cout << "=========================================\n";
+    std::cout << " Total de paquets analysés : " << packetCount << "\n";
+    std::cout << " Paquets valides           : " << (packetCount - errorCount) << "\n";
+    std::cout << " Paquets en erreur         : " << errorCount << "\n";
+    std::cout << "=========================================\n";
+
     dataSource_->close();
     return true;
 }
 
 std::expected<RadiotapInfo, ParseError> InfoDroneParser::extractRadiotap(std::span<const uint8_t> packetData) const {
-    if (packetData.size() < 8) {
-        return std::unexpected(ParseError::PacketTooShort);
-    }
-
-    if (packetData[0] != 0) {
+    if (packetData.size() < 8 || packetData[0] != 0) {
         return std::unexpected(ParseError::InvalidRadiotap);
     }
 
@@ -77,18 +85,58 @@ std::expected<RadiotapInfo, ParseError> InfoDroneParser::extractRadiotap(std::sp
     std::memcpy(&radiotap_len, packetData.data() + 2, sizeof(uint16_t));
     radiotap_len = le16toh(radiotap_len);
 
-    if (radiotap_len < 8 || radiotap_len > packetData.size() || packetData.size() < radiotap_len + sizeof(IEEE80211Header)) {
+    if (radiotap_len < 8 || radiotap_len > packetData.size()) {
         return std::unexpected(ParseError::InvalidRadiotap);
     }
 
     int8_t rssi_dbm = 0;
     bool rssiFound = false;
-    for (size_t i = 8; i < radiotap_len && i < packetData.size(); ++i) {
-        int8_t val = static_cast<int8_t>(packetData[i]);
-        if (val >= -100 && val <= -10) {
-            rssi_dbm = val;
+
+    size_t offset = 4;
+    
+    std::vector<uint32_t> present_words;
+    uint32_t present_flags = 0;
+    
+    do {
+        if (offset + 4 > radiotap_len) return std::unexpected(ParseError::InvalidRadiotap);
+        std::memcpy(&present_flags, packetData.data() + offset, sizeof(uint32_t));
+        present_flags = le32toh(present_flags);
+        present_words.push_back(present_flags);
+        offset += 4;
+    } while ((present_flags & 0x80000000) && (offset < radiotap_len));
+
+    auto alignOffset = [](size_t current, size_t align) {
+        return (current + (align - 1)) & ~(align - 1);
+    };
+
+    if (!present_words.empty() && (present_words[0] & (1 << 0))) {
+        offset = alignOffset(offset, 8) + 8; // TSFT
+    }
+    if (!present_words.empty() && (present_words[0] & (1 << 1))) {
+        offset = alignOffset(offset, 1) + 1; // Flags
+    }
+    if (!present_words.empty() && (present_words[0] & (1 << 2))) {
+        offset = alignOffset(offset, 1) + 1; // Rate
+    }
+    if (!present_words.empty() && (present_words[0] & (1 << 3))) {
+        offset = alignOffset(offset, 2) + 4; // Channel
+    }
+    if (!present_words.empty() && (present_words[0] & (1 << 4))) {
+        offset = alignOffset(offset, 1) + 2; // FHSS
+    }
+
+    bool has_antenna_signal = false;
+    if (!present_words.empty() && (present_words[0] & (1 << 5))) {
+        has_antenna_signal = true;
+    } else if (present_words.size() > 1 && (present_words[1] & (1 << 5))) {
+        has_antenna_signal = true;
+    }
+
+    if (has_antenna_signal) {
+        offset = alignOffset(offset, 1);
+        if (offset < radiotap_len) {
+            rssi_dbm = static_cast<int8_t>(packetData[offset]);
             rssiFound = true;
-            break;
         }
     }
 
@@ -99,15 +147,14 @@ std::expected<void, ParseError> InfoDroneParser::parseInformationElements(std::s
     while (offset + 2 <= packetData.size()) {
         uint8_t tagId = packetData[offset];
         uint8_t tagLen = packetData[offset + 1];
-        offset += 2;
 
-        if (offset + tagLen > packetData.size()) {
+        if (offset + 2 + tagLen > packetData.size()) {
             return std::unexpected(ParseError::MalformedInformationElement);
         }
 
-        std::span<const uint8_t> tagData = packetData.subspan(offset, tagLen);
+        std::span<const uint8_t> tagData = packetData.subspan(offset + 2, tagLen);
 
-        if (tagId == 0 && tagLen > 0) {
+        if (tagId == 0 && tagLen > 0) { // SSID
             std::string ssid(tagData.begin(), tagData.end());
             bool isValid = true;
             for (char c : ssid) {
@@ -117,147 +164,129 @@ std::expected<void, ParseError> InfoDroneParser::parseInformationElements(std::s
                 }
             }
             if (isValid && !ssid.empty()) {
-                std::cout << "  -> [IE] SSID     : " << ssid << "\n";
+                std::cout << "  -> [IE] SSID               : " << ssid << "\n";
             }
         } 
-        else if (tagId == 3 && tagLen == 1) {
-            std::cout << "  -> [IE] Canal    : " << static_cast<int>(tagData[0]) << "\n";
+        else if (tagId == 3 && tagLen == 1) { // Canal
+            std::cout << "  -> [IE] Canal              : " << static_cast<int>(tagData[0]) << "\n";
         } 
-        else if (tagId == 221) {
+        else if (tagId == 221) { // Vendor Specific
             parseVendorSpecificTag(tagData);
         }
 
-        offset += tagLen;
+        offset += 2 + tagLen;
     }
     
     return {};
 }
 
 void InfoDroneParser::parseVendorSpecificTag(std::span<const uint8_t> tagData) {
-    uint8_t tagLen = static_cast<uint8_t>(tagData.size());
-    if (tagLen < 3) return;
+    if (tagData.size() < 3) {
+        return;
+    }
 
     size_t offset = 0;
-
     uint8_t o1 = tagData[offset++];
     uint8_t o2 = tagData[offset++];
     uint8_t o3 = tagData[offset++];
 
-    bool isValidDGAC = (o1 == 0x6A && o2 == 0x5C && o3 == 0x35);
+    bool isParrot = (o1 == 0x90 && o2 == 0x03 && o3 == 0xB7);
+    bool isDGAC   = (o1 == 0x6A && o2 == 0x5C && o3 == 0x35);
 
-    std::cout << "      -> CID / OUI  : " 
-              << std::hex << std::setfill('0') 
-              << std::setw(2) << (int)o1 << ":" 
-              << std::setw(2) << (int)o2 << ":" 
-              << std::setw(2) << (int)o3 << std::dec 
-              << (isValidDGAC ? " (Conforme Signalement DGAC)" : " (Autre / Non-conforme)") << "\n";
-
-    if (!isValidDGAC) {
+    if (!isParrot && !isDGAC) {
         return;
     }
 
-    if (tagLen == 24) {
-        uint8_t type = tagData[offset++];
-        uint8_t flags1 = tagData[offset++];
-        uint8_t flags2 = tagData[offset++];
+    std::cout << "  -> [IE Vendor] OUI        : " 
+              << std::hex << std::setfill('0') 
+              << std::setw(2) << static_cast<int>(o1) << ":" 
+              << std::setw(2) << static_cast<int>(o2) << ":" 
+              << std::setw(2) << static_cast<int>(o3) << std::dec;
 
-        std::cout << "      -> Type       : " << static_cast<int>(type) << "\n";
-        std::cout << "      -> Flags      : " << static_cast<int>(flags1) << ", " << static_cast<int>(flags2) << "\n";
-
-        if (offset + sizeof(int16_t) <= tagLen) {
-            int16_t alt = 0;
-            std::memcpy(&alt, &tagData[offset], sizeof(int16_t));
-            alt = static_cast<int16_t>(le16toh(alt));
-            std::cout << "      -> Altitude   : " << alt << " m\n";
-            offset += sizeof(int16_t);
-        }
-
-        if (offset + sizeof(int32_t) <= tagLen) {
-            int32_t val1 = 0;
-            std::memcpy(&val1, &tagData[offset], sizeof(int32_t));
-            val1 = static_cast<int32_t>(le32toh(val1));
-            std::cout << "      -> Latitude courante : " << static_cast<double>(val1) / 100000.0 << "°\n";
-            offset += sizeof(int32_t);
-        }
-
-        if (offset + sizeof(int32_t) <= tagLen) {
-            int32_t val2 = 0;
-            std::memcpy(&val2, &tagData[offset], sizeof(int32_t));
-            val2 = static_cast<int32_t>(le32toh(val2));
-            std::cout << "      -> Longitude courante : " << static_cast<double>(val2) / 100000.0 << "°\n";
-            offset += sizeof(int32_t);
-        }
-
-        if (offset + 4 <= tagLen) {
-            uint32_t tail = 0;
-            std::memcpy(&tail, &tagData[offset], sizeof(uint32_t));
-            tail = static_cast<uint32_t>(le32toh(tail));
-            std::cout << "      -> Tail       : 0x" << std::hex << tail << std::dec << "\n";
-        }
+    if (isParrot) {
+        std::cout << " (Parrot SA - InfoDrone)\n";
+    } else if (isDGAC) {
+        std::cout << " (DGAC Signalement Direct)\n";
     }
-    else if (tagLen == 7) {
-        if (offset + 3 <= tagLen) {
-            std::cout << "      -> Sub-Type   : " << static_cast<int>(tagData[offset++]) << "\n";
-            std::cout << "      -> Statut 1   : " << static_cast<int>(tagData[offset++]) << "\n";
-            std::cout << "      -> Statut 2   : " << static_cast<int>(tagData[offset++]) << "\n";
+
+    if (offset >= tagData.size()) return;
+
+    uint8_t vsType = tagData[offset++];
+    std::cout << "      -> Subtype / VS Type   : 0x" << std::hex << static_cast<int>(vsType) << std::dec << "\n";
+
+    if (isParrot && vsType == 0x09) {
+        if (offset >= tagData.size()) return;
+
+        uint8_t payloadLen = tagData[offset++];
+        std::cout << "      -> Payload Length      : " << static_cast<int>(payloadLen) << " octets\n";
+
+        if (offset + payloadLen > tagData.size()) {
+            payloadLen = static_cast<uint8_t>(tagData.size() - offset);
         }
-    }
-    else {
-        uint8_t vsType = tagData[offset++];
-        std::cout << "      -> VS Type    : 0x" << std::hex << static_cast<int>(vsType) << std::dec << "\n";
 
-        while (offset + 2 <= tagData.size()) {
-            uint8_t type = tagData[offset++];
-            uint8_t length = tagData[offset++];
+        std::span<const uint8_t> payload = tagData.subspan(offset, payloadLen);
 
-            if (offset + length > tagData.size()) break;
-
-            std::span<const uint8_t> valueSpan = tagData.subspan(offset, length);
-            offset += length;
-
-            switch (type) {
-                case 0x01:
-                    if (length >= 1) std::cout << "      -> Version    : " << static_cast<int>(valueSpan[0]) << "\n";
-                    break;
-                case 0x02:
-                case 0x03: {
-                    std::string droneId(valueSpan.begin(), valueSpan.end());
-                    std::cout << "      -> Drone ID   : " << droneId << "\n";
-                    break;
-                }
-                case 0x04:
-                case 0x05:
-                case 0x08:
-                case 0x09: {
-                    if (length == 4) {
-                        int32_t raw_coord = 0;
-                        std::memcpy(&raw_coord, valueSpan.data(), sizeof(int32_t));
-                        raw_coord = static_cast<int32_t>(le32toh(raw_coord));
-                        double coord = static_cast<double>(raw_coord) / 100000.0;
-                        std::string label = (type == 0x04) ? "Latitude courante" : (type == 0x05) ? "Longitude courante" : (type == 0x08) ? "Latitude décollage" : "Longitude décollage";
-                        std::cout << "      -> " << label << " : " << coord << "°\n";
-                    }
-                    break;
-                }
-                case 0x06:
-                case 0x07: {
-                    if (length == 2) {
-                        int16_t raw_val = 0;
-                        std::memcpy(&raw_val, valueSpan.data(), sizeof(int16_t));
-                        raw_val = static_cast<int16_t>(le16toh(raw_val));
-                        std::string label = (type == 0x06) ? "Altitude" : "Hauteur";
-                        std::cout << "      -> " << label << " : " << raw_val << " m\n";
-                    }
-                    break;
-                }
-                default:
-                    break;
-            }
+        size_t pOffset = 0;
+        
+        // 1. Lecture de l'identifiant complet (18 octets)
+        if (payload.size() >= 18) {
+            std::string droneId(reinterpret_cast<const char*>(payload.data()), 18);
+            std::cout << "      -> Drone ID / Serial   : " << droneId << "\n";
+            pOffset = 18; 
+        } else {
+            std::cout << "      -> [Avertissement] Payload trop court pour l'ID (nécessite 18 octets)\n";
+            return;
         }
+
+        // 2. Vérification s'il reste assez d'octets pour les flags et le GPS
+        if (pOffset + 11 > payload.size()) {
+            std::cout << "      -> [Avertissement] Trame partielle (ID présent, mais données GPS manquantes)\n";
+            return;
+        }
+
+        // 3. Lecture du statut / flags (1 octet)
+        uint8_t flagsOrStatus = payload[pOffset++];
+        std::cout << "      -> Flags / Status      : 0x" << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(flagsOrStatus) << std::dec << "\n";
+        
+        bool emergency = (flagsOrStatus & 0x01);
+        bool airborne  = (flagsOrStatus & 0x10);
+        bool gps_ok    = (flagsOrStatus & 0x40);
+        
+        std::cout << "         └─ Vol en cours     : " << (airborne ? "Oui" : "Non") << "\n";
+        std::cout << "         └─ Fix GPS valide   : " << (gps_ok ? "Oui" : "Non") << "\n";
+        std::cout << "         └─ Urgence/SOS      : " << (emergency ? "Oui" : "Non") << "\n";
+
+        // 4. Lecture Latitude (4 octets)
+        uint32_t raw_lat_u = 0;
+        std::memcpy(&raw_lat_u, &payload[pOffset], 4);
+        raw_lat_u = le32toh(raw_lat_u);
+        int32_t raw_lat = static_cast<int32_t>(raw_lat_u);
+        double lat = static_cast<double>(raw_lat) * 1e-7;
+        std::cout << "      -> Latitude            : " << std::fixed << std::setprecision(6) << lat << "°\n";
+        pOffset += 4;
+
+        // 5. Lecture Longitude (4 octets)
+        uint32_t raw_lon_u = 0;
+        std::memcpy(&raw_lon_u, &payload[pOffset], 4);
+        raw_lon_u = le32toh(raw_lon_u);
+        int32_t raw_lon = static_cast<int32_t>(raw_lon_u);
+        double lon = static_cast<double>(raw_lon) * 1e-7;
+        std::cout << "      -> Longitude           : " << std::fixed << std::setprecision(6) << lon << "°\n";
+        pOffset += 4;
+
+        // 6. Lecture Altitude (2 octets)
+        uint16_t raw_alt = 0;
+        std::memcpy(&raw_alt, &payload[pOffset], 2);
+        raw_alt = le16toh(raw_alt);
+        int16_t alt = static_cast<int16_t>(raw_alt);
+        std::cout << "      -> Altitude (MSL)      : " << alt << " m\n";
     }
 }
 
 std::expected<void, ParseError> InfoDroneParser::decodePacket(std::span<const uint8_t> packetData) {
+    if (packetData.size() < 8) {
+        return std::unexpected(ParseError::PacketTooShort);
+    }
     auto radiotapResult = extractRadiotap(packetData);
     if (!radiotapResult) {
         return std::unexpected(radiotapResult.error());
@@ -273,8 +302,11 @@ std::expected<void, ParseError> InfoDroneParser::decodePacket(std::span<const ui
     const auto* macHeader = reinterpret_cast<const IEEE80211Header*>(packetData.data() + offset);
     offset += sizeof(IEEE80211Header);
 
-    uint8_t frame_ctrl_type = macHeader->frame_control & 0x00FC;
-    if (frame_ctrl_type != 0x0080 && frame_ctrl_type != 0x0050) {
+    uint16_t fc = le16toh(macHeader->frame_control);
+    uint8_t type = (fc >> 2) & 0x03;
+    uint8_t subtype = (fc >> 4) & 0x0F;
+
+    if (type != 0 || subtype != 8) { 
         return std::unexpected(ParseError::InvalidMacHeader);
     }
 
@@ -285,12 +317,11 @@ std::expected<void, ParseError> InfoDroneParser::decodePacket(std::span<const ui
         return std::string(buf);
     };
 
-    std::cout << "--- TRAME 802.11 / PARROT ANAFI ---\n";
-    std::cout << "  [Radiotap] Longueur : " << radiotap_len << " octets | RSSI : " 
-              << (rssiFound ? std::to_string(rssi_dbm) + " dBm" : "N/A") << "\n";
-    std::cout << "  [802.11]   Type     : 0x" << std::hex << macHeader->frame_control << std::dec << "\n";
-    std::cout << "  [802.11]   Source   : " << macToString(macHeader->addr2) << "\n";
-    std::cout << "  [802.11]   BSSID    : " << macToString(macHeader->addr3) << "\n";
+    std::cout << "=== TRAME 802.11 / PARROT ANAFI ===\n";
+    std::cout << "  [Radiotap] Longueur        : " << radiotap_len << " octets | RSSI : " 
+              << (rssiFound ? std::to_string(rssi_dbm) + " dBm" : "Inconnu") << "\n";
+    std::cout << "  [802.11]   Type            : Management / Beacon\n";
+    std::cout << "  [802.11]   Source / BSSID  : " << macToString(macHeader->addr2) << "\n";
 
     if (offset + 12 > packetData.size()) {
         return std::unexpected(ParseError::BeaconHeaderTruncated);
@@ -301,7 +332,7 @@ std::expected<void, ParseError> InfoDroneParser::decodePacket(std::span<const ui
         return std::unexpected(result.error());
     }
     
-    std::cout << "====================================\n\n";
+    std::cout << "===================================\n\n";
     return {};
 }
 

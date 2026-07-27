@@ -35,7 +35,8 @@ TEST_F(InfoDroneParserTest, PacketTooShort) {
 }
 
 TEST_F(InfoDroneParserTest, InvalidRadiotap) {
-    std::vector<uint8_t> packet = {0x00, 0x00, 0x2C, 0x01};
+    // Annonce une longueur de 16 octets (0x0010) mais le paquet ne fait que 8 octets
+    std::vector<uint8_t> packet = {0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00};
     auto result = decode(packet);
     
     ASSERT_FALSE(result.has_value());
